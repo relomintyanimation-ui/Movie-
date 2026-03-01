@@ -1,20 +1,52 @@
 import os
 import uuid
+import asyncio
+import urllib.request
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
+from contextlib import asynccontextmanager
 import yt_dlp
 
-app = FastAPI()
+# BACKGROUND TASK: Yeh function har 5 minute mein Render ko jagayega
+async def keep_awake():
+    while True:
+        await asyncio.sleep(300)  # 5 minute (300 second) ka wait
+        try:
+            # Render automatically apne URL ka pata laga leta hai
+            server_url = os.environ.get("RENDER_EXTERNAL_URL")
+            if server_url:
+                urllib.request.urlopen(f"{server_url}/ping")
+                print("Server ne khud ko jaga liya!")
+        except Exception as e:
+            print(f"Jagane mein error: {e}")
+
+# Server start hote hi jagane wala system chalu
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(keep_awake())
+    yield
+    task.cancel()
+
+app = FastAPI(lifespan=lifespan)
 
 def remove_file(path: str):
     if os.path.exists(path):
         os.remove(path)
 
+# HIDDEN ROUTE: Yeh sirf server ko jagane ke kaam aayega
+@app.get("/ping")
+async def ping():
+    return {"status": "awake"}
+
+# MAIN DOWNLOADER: Dashboard hat gaya, direct link daalo aur download karo!
 @app.get("/{url:path}")
 async def download_video(url: str, background_tasks: BackgroundTasks):
     clean_url = url
     
-    # URL ko theek karne ka logic
+    # Agar galti se system ping/favicon maange, toh ignore karo
+    if clean_url in ["ping", "favicon.ico"]:
+        return {"status": "ignored"}
+
     if clean_url.startswith("http:/") and not clean_url.startswith("http://"):
         clean_url = clean_url.replace("http:/", "http://", 1)
     elif clean_url.startswith("https:/") and not clean_url.startswith("https://"):
@@ -26,7 +58,7 @@ async def download_video(url: str, background_tasks: BackgroundTasks):
         else:
             clean_url = "https://" + clean_url
 
-    # SMART TRICK: YouTube links ke liye Error bypass karega aur SSYouTube par bhej dega
+    # SMART TRICK: YouTube links ke liye Error bypass (Redirect)
     if "youtube.com" in clean_url or "youtu.be" in clean_url:
         clean_url = clean_url.replace("youtube.com", "ssyoutube.com").replace("youtu.be/", "ssyoutube.com/watch?v=")
         return RedirectResponse(url=clean_url)
@@ -37,7 +69,7 @@ async def download_video(url: str, background_tasks: BackgroundTasks):
     
     ydl_opts = {
         'outtmpl': filepath,
-        'format': 'b',  # Bina merge kiye fast download ke liye
+        'format': 'b',  # Fast speed ke liye
         'quiet': True,
         'no_warnings': True,
         'nocheckcertificate': True,
@@ -57,3 +89,9 @@ async def download_video(url: str, background_tasks: BackgroundTasks):
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Download failed: {str(e)}")
+
+# Error bachane wali line (Jab Render server chalaye)
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
